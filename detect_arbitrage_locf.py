@@ -78,13 +78,13 @@ def load_yaml_config(path: Optional[Path]) -> dict:
 
     Each venue defines a commission in basis points and can optionally
     specify a separate sell-side tax (also in bps).  Defaults loosely
-    mirror typical rates: both venues charge roughly 1.5 bps commission while
-    KRX also imposes a 20 bps sell-side tax.
+    mirror typical rates: both venues charge roughly 1.5 bps commission and
+    also impose a 20 bps sell-side tax.
     """
     default_cfg = {
         "fees": {
             "krx": {"commission_bps": 1.5, "sell_tax_bps": 20},
-            "nxt": {"commission_bps": 1.5},
+            "nxt": {"commission_bps": 1.5, "sell_tax_bps": 20},
         },
         "spread_engine": {
             "edge_rule": {
