@@ -73,11 +73,18 @@ class QuoteSnapshot:
 
 
 def load_yaml_config(path: Optional[Path]) -> dict:
-    """Load YAML config if provided; otherwise return defaults."""
+    """
+    Load YAML config if provided; otherwise return defaults.
+
+    Each venue defines a commission in basis points and can optionally
+    specify a separate sell-side tax (also in bps).  Defaults loosely
+    mirror typical rates: both venues charge roughly 1.5 bps commission while
+    KRX also imposes a 20 bps sell-side tax.
+    """
     default_cfg = {
         "fees": {
-            "krx": {"broker_bps": 8},           # 0.08%
-            "nxt": {"broker_bps": 8, "regulatory_bps": 0},  # adjust as needed
+            "krx": {"commission_bps": 1.5, "sell_tax_bps": 20},
+            "nxt": {"commission_bps": 1.5},
         },
         "spread_engine": {
             "edge_rule": {
@@ -125,21 +132,26 @@ def calculate_direction_edge(
     sell_venue: str,
     sell_price: int,
     sell_size: int,
-    fees_bps: Dict[str, float],
+    fees_bps: Dict[str, Dict[str, float]],
 ) -> Optional[dict]:
     """
     Fees in bps (%*100), applied to each side:
-        buy_fees  = buy_price  * fees_bps[buy_venue]  / 10000
-        sell_fees = sell_price * fees_bps[sell_venue] / 10000
-    net_edge_krw = (sell_price - buy_price) - (buy_fees + sell_fees)
-    edge_bps     = net_edge_krw / buy_price * 10000
+        buy_fee  = buy_price  * commission_bps / 10000
+        sell_fee = sell_price * (commission_bps + sell_tax_bps) / 10000
+
+    where ``sell_tax_bps`` defaults to 0 if unspecified.  ``net_edge_krw``
+    subtracts both fees from the gross spread and ``edge_bps`` expresses the
+    result relative to the buy price.
     """
     if sell_price <= buy_price:
         return None
     gross_edge = sell_price - buy_price
-    buy_fees = buy_price * fees_bps.get(buy_venue, 0.0) / 10000.0
-    sell_fees = sell_price * fees_bps.get(sell_venue, 0.0) / 10000.0
-    total_fees = buy_fees + sell_fees
+    buy_fee_rate = fees_bps.get(buy_venue, {}).get("commission_bps", 0.0)
+    sell_commission = fees_bps.get(sell_venue, {}).get("commission_bps", 0.0)
+    sell_tax = fees_bps.get(sell_venue, {}).get("sell_tax_bps", 0.0)
+    buy_fee = buy_price * buy_fee_rate / 10000.0
+    sell_fee = sell_price * (sell_commission + sell_tax) / 10000.0
+    total_fees = buy_fee + sell_fee
     net_edge = gross_edge - total_fees
     edge_bps = (net_edge / buy_price * 10000.0) if buy_price else 0.0
     max_qty = int(min(buy_size, sell_size))
@@ -191,9 +203,16 @@ def detect_arbitrage_locf_percent(
     df = load_input_excel(input_path)
     cfg = load_yaml_config(config_path)
 
+    # Build per-venue fee dictionary: commission + optional sell-side tax.
     fees_bps = {
-        "KRX": float(cfg["fees"]["krx"]["broker_bps"]),
-        "NXT": float(cfg["fees"]["nxt"]["broker_bps"]) + float(cfg["fees"]["nxt"].get("regulatory_bps", 0)),
+        "KRX": {
+            "commission_bps": float(cfg["fees"]["krx"]["commission_bps"]),
+            "sell_tax_bps": float(cfg["fees"]["krx"].get("sell_tax_bps", 0.0)),
+        },
+        "NXT": {
+            "commission_bps": float(cfg["fees"]["nxt"]["commission_bps"]),
+            "sell_tax_bps": float(cfg["fees"]["nxt"].get("sell_tax_bps", 0.0)),
+        },
     }
     min_ticks = int(cfg["spread_engine"]["edge_rule"]["min_net_ticks_after_fees"])
     min_visible = int(cfg["spread_engine"]["edge_rule"]["also_require_min_visible_qty"])
