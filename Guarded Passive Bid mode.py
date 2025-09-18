@@ -268,7 +268,8 @@ def _read_input_any(path: Path) -> pd.DataFrame:
     df["symbol"] = df["symbol"].astype(str).str.strip()
 
     # Ensure columns exist; coerce numerics but DO NOT drop rows lacking quotes
-    for c in ["fid_41", "fid_51", "fid_61", "fid_71", "fid_10", "fid_11"]:
+    # NOTE: 체결가격 = fid_10, 체결량 = fid_15 (signed; sign determines side)
+    for c in ["fid_41", "fid_51", "fid_61", "fid_71", "fid_10", "fid_15"]:
         if c not in df.columns:
             df[c] = np.nan
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -755,32 +756,48 @@ def backtest_guarded_passive_bid(
             st = states.get(sym)
             if not st or not st.active or st.filled:
                 continue
-            # We only count prints on the BUY venue where we rest our bid
+
+            # Count only prints on our BUY venue
             if venue != st.buy_venue:
                 continue
 
-            price_signed = getattr(row, "fid_10")
-            size = int(getattr(row, "fid_11") or 0)
-            if pd.isna(price_signed) or size <= 0:
+            # 체결가격 = fid_10 (unsigned price), 체결량 = fid_15 (signed)
+            trade_px = int(getattr(row, "fid_10") or 0)
+            qty_signed = getattr(row, "fid_15")
+            if (trade_px <= 0) or pd.isna(qty_signed):
+                continue
+            qty_signed = int(qty_signed)
+            if qty_signed == 0:
                 continue
 
-            # Only count 'hit-bid' prints (fid_10 > 0), and at or below our bid price
-            if price_signed <= 0:
-                continue
-            trade_px = int(abs(price_signed))
-            if trade_px > st.bid_price:
-                continue
+            # Current top-of-book on the buy venue
+            snap = snapshots.get(sym, QuoteSnapshot())
+            if st.buy_venue == "KRX":
+                curr_bid, curr_ask = snap.krx_bid, snap.krx_ask
+            else:
+                curr_bid, curr_ask = snap.nxt_bid, snap.nxt_ask
 
-            st.cum_hit_bid += size
+            # New rule:
+            #   qty_signed < 0  → hit bid (FID_51) at the matching price
+            #   qty_signed > 0  → hit ask (FID_41)  (ignored for passive BID fills)
+            if qty_signed < 0:
+                # Require price to match current best bid (“matching price”)
+                if curr_bid <= 0 or trade_px != int(curr_bid):
+                    continue
+                if st.bid_price <= 0:
+                    continue
 
-            # Filled?
-            if st.cum_hit_bid >= (st.pre_existing + st.qty):
-                st.filled = True
-                st.fill_ts = ts
-                st.fill_row_id = getattr(row, "row_id")  # NEW: fill pointer
-                st.hedge_due_ts = ts + pd.to_timedelta(int(max(0, latency_ms)), unit="ms")
-                states[sym] = st  # write back
+                st.cum_hit_bid += abs(qty_signed)
 
+                # Filled when cumulative hit-bid >= pre-existing + our qty
+                if st.cum_hit_bid >= (st.pre_existing + st.qty):
+                    st.filled = True
+                    st.fill_ts = ts
+                    st.fill_row_id = getattr(row, "row_id")
+                    st.hedge_due_ts = ts + pd.to_timedelta(int(max(0, latency_ms)), unit="ms")
+                    states[sym] = st
+
+            # qty_signed > 0 (hit ask) is irrelevant for passive BID fills
             continue
 
         # ignore other real_type rows if any
