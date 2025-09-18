@@ -4,15 +4,16 @@
 """
 Arbitrage / Guarded Passive Bid Backtester (with traceability)
 - (A) Original LOCF arbitrage detector (percent/bps logic)
-- (B) Guarded Passive Bid backtest using 주식체결(fid_10,fid_11)
+- (B) Guarded Passive Bid backtest using 주식체결(fid_10,fid_15)
 
 UPGRADES:
 - Input: Excel (.xlsx) OR Parquet (.parquet). Mixed stream supported:
     * real_type == '주식호가잔량' → fid_41/fid_51/fid_61/fid_71 (quotes)
-    * real_type == '주식체결'   → fid_10 (±price; sign=side), fid_11 (size)
+    * real_type == '주식체결'   → fid_10 (unsigned price), fid_15 (signed size; sign=side)
 - Outputs:
     * Arbitrage detector → <stem>_arbitrage_windows_bps.{csv,parquet,xlsx}
     * Guarded Passive    → <stem>_guarded_passive.{csv,parquet,xlsx}
+    * NEW Summary        → <stem>_guarded_passive_summary.{csv,parquet,xlsx}
 - VI(변동성완화장치) filter preserved; pre-open cutoff preserved (drop before 09:00:30).
 - NEW traceability:
     * Input gets 'row_id' after sort.
@@ -536,9 +537,7 @@ def detect_arbitrage_locf_percent(
             "sell_price": best["sell_price"],
             "edge_krw": best["edge_krw"],
             "total_fees_krw": best["total_fees_krw"],
-            "net_edge_krw": best["net_edge_krw"],
-            "edge_bps": best["edge_bps"],
-            "max_qty": best["max_qty"],
+            "net_edge_krw": best["net_edge_krw"], "edge_bps": best["edge_bps"], "max_qty": best["max_qty"],
         }
         opps.append(record)
 
@@ -611,6 +610,10 @@ def backtest_guarded_passive_bid(
     states: Dict[str, PassiveState] = {}
 
     trades: List[dict] = []
+
+    # NEW: order counters
+    orders_triggered = 0
+    orders_cancelled = 0
 
     def _valid_time_and_vi(ts: pd.Timestamp, sym: str) -> bool:
         tod = pd.Timedelta(hours=ts.hour, minutes=ts.minute, seconds=ts.second, microseconds=ts.microsecond)
@@ -743,10 +746,12 @@ def backtest_guarded_passive_bid(
                             arm_row_id=getattr(row, "row_id")  # NEW: entry pointer
                         )
                         states[sym] = st
+                        orders_triggered += 1  # NEW: count ARM as triggered
                 # else: stay idle
             else:
                 # Already ARMED (but not yet filled): CANCEL if window closed
                 if st.active and not st.filled and not window_open:
+                    orders_cancelled += 1  # NEW: count cancellation
                     states[sym] = PassiveState()  # cancel → reset
 
             continue  # quote rows handled; move on
@@ -789,7 +794,7 @@ def backtest_guarded_passive_bid(
 
                 st.cum_hit_bid += abs(qty_signed)
 
-                # Filled when cumulative hit-bid >= pre-existing + our qty
+                # Filled when cumulative hit-bid >= pre_existing + our qty
                 if st.cum_hit_bid >= (st.pre_existing + st.qty):
                     st.filled = True
                     st.fill_ts = ts
@@ -817,6 +822,20 @@ def backtest_guarded_passive_bid(
         df_out=trades_df,
         base_stem_path=base_stem,
         suffix_stem="guarded_passive",
+        write_xlsx=write_xlsx
+    )
+
+    # --- NEW: save summary (triggered / cancelled / filled) next to outputs ---
+    summary_df = pd.DataFrame([{
+        "orders_triggered": orders_triggered,
+        "orders_cancelled": orders_cancelled,
+        "orders_filled": len(trades_df),
+    }])
+    _save_any_all_formats(
+        df_raw=None,
+        df_out=summary_df,
+        base_stem_path=base_stem,
+        suffix_stem="guarded_passive_summary",
         write_xlsx=write_xlsx
     )
 
